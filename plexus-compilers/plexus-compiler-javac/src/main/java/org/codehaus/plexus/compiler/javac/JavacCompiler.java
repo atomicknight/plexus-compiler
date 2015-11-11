@@ -47,6 +47,7 @@ import org.codehaus.plexus.compiler.CompilerException;
 import org.codehaus.plexus.compiler.CompilerMessage;
 import org.codehaus.plexus.compiler.CompilerOutputStyle;
 import org.codehaus.plexus.compiler.CompilerResult;
+import org.codehaus.plexus.compiler.CompilerMessage.Kind;
 import org.codehaus.plexus.util.FileUtils;
 import org.codehaus.plexus.util.Os;
 import org.codehaus.plexus.util.StringUtils;
@@ -86,6 +87,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class JavacCompiler
     extends AbstractCompiler
 {
+
+    // see compiler.err.error in compiler.properties of javac sources
+    private static final String[] ERROR_PREFIXES = { "error: ", "\u9519\u8bef: ", "\u30a8\u30e9\u30fc: " };
 
     // see compiler.warn.warning in compiler.properties of javac sources
     private static final String[] WARNING_PREFIXES = { "warning: ", "\u8b66\u544a: ", "\u8b66\u544a\uff1a " };
@@ -605,49 +609,47 @@ public class JavacCompiler
 
         String line;
 
-        StringBuilder buffer;
+        StringBuilder buffer = new StringBuilder();
 
-        while ( true )
+        while ( ( line = input.readLine() ) != null )
         {
-            // cleanup the buffer
-            buffer = new StringBuilder(); // this is quicker than clearing it
-
-            // most errors terminate with the '^' char
-            do
+            if ( line.length() == 0 )
             {
-                line = input.readLine();
-
-                if ( line == null )
-                {
-                    // javac output not detected by other parsing
-                    if ( buffer.length() > 0 && buffer.toString().startsWith( "javac:" ) )
-                    {
-                        errors.add( new CompilerMessage( buffer.toString(), CompilerMessage.Kind.ERROR ) );
-                    }
-                    return errors;
-                }
-
-                // TODO: there should be a better way to parse these
-                if ( ( buffer.length() == 0 ) && line.startsWith( "error: " ) )
-                {
-                    errors.add( new CompilerMessage( line, true ) );
-                }
-                else if ( ( buffer.length() == 0 ) && isNote( line ) )
-                {
-                    // skip, JDK 1.5 telling us deprecated APIs are used but -Xlint:deprecation isn't set
-                }
-                else
-                {
-                    buffer.append( line );
-
-                    buffer.append( EOL );
-                }
+                continue;
             }
-            while ( !line.endsWith( "^" ) );
 
-            // add the error bean
+            char firstChar = line.charAt( 0 );
+
+            // skip summary of warnings/errors
+            if ( Character.isDigit( firstChar ) )
+            {
+                continue;
+            }
+
+            // start of a new message?
+            if ( buffer.length() > 0 && !Character.isWhitespace( firstChar ) )
+            {
+                // save message, then reset buffer
+                String message = buffer.toString();
+                if ( message.startsWith( "javac:" ) ) {
+                    // specially handle javac output
+                    errors.add( new CompilerMessage( message, CompilerMessage.Kind.ERROR ) );
+                } else {
+                    errors.add( parseModernError( exitCode, buffer.toString() ) );
+                }
+                buffer.setLength( 0 );
+            }
+
+            buffer.append( line ).append( EOL );
+        }
+
+        // handle last message
+        if ( buffer.length() > 0 )
+        {
             errors.add( parseModernError( exitCode, buffer.toString() ) );
         }
+
+        return errors;
     }
 
     private static boolean isNote( String line )
@@ -671,6 +673,12 @@ public class JavacCompiler
      */
     static CompilerMessage parseModernError( int exitCode, String error )
     {
+        String notePrefix = getNotePrefix( error );
+        if ( notePrefix != null )
+        {
+            return new CompilerMessage( error.substring( notePrefix.length() ), Kind.NOTE );
+        }
+
         StringTokenizer tokens = new StringTokenizer( error, ":" );
 
         boolean isError = exitCode != 0;
@@ -745,39 +753,29 @@ public class JavacCompiler
             else
             {
                 isError = exitCode != 0;
+
+                // Remove the 'error: ' prefix
+                String errorPrefix = getErrorPrefix( msg );
+                if ( errorPrefix != null )
+                {
+                    msg = msg.substring( errorPrefix.length() );
+                }
             }
 
             msgBuffer.append( msg );
-
-            msgBuffer.append( EOL );
 
             String context = tokens.nextToken( EOL );
 
             String pointer = tokens.nextToken( EOL );
 
+            // Extra context
             if ( tokens.hasMoreTokens() )
             {
-                msgBuffer.append( context );    // 'symbol' line
-
-                msgBuffer.append( EOL );
-
-                msgBuffer.append( pointer );    // 'location' line
-
-                msgBuffer.append( EOL );
-
-                context = tokens.nextToken( EOL );
-
-                try
+                do
                 {
-                    pointer = tokens.nextToken( EOL );
+                    msgBuffer.append( EOL ).append( tokens.nextToken( EOL ) );
                 }
-                catch ( NoSuchElementException e )
-                {
-                    pointer = context;
-
-                    context = null;
-                }
-
+                while ( tokens.hasMoreTokens() );
             }
 
             String message = msgBuffer.toString();
@@ -807,6 +805,18 @@ public class JavacCompiler
         }
     }
 
+    private static String getErrorPrefix( String msg )
+    {
+        for ( int i = 0; i < ERROR_PREFIXES.length; i++ )
+        {
+            if ( msg.startsWith( ERROR_PREFIXES[i] ) )
+            {
+                return ERROR_PREFIXES[i];
+            }
+        }
+        return null;
+    }
+
     private static String getWarnPrefix( String msg )
     {
         for ( int i = 0; i < WARNING_PREFIXES.length; i++ )
@@ -814,6 +824,18 @@ public class JavacCompiler
             if ( msg.startsWith( WARNING_PREFIXES[i] ) )
             {
                 return WARNING_PREFIXES[i];
+            }
+        }
+        return null;
+    }
+
+    private static String getNotePrefix( String msg )
+    {
+        for ( int i = 0; i < NOTE_PREFIXES.length; i++ )
+        {
+            if ( msg.startsWith( NOTE_PREFIXES[i] ) )
+            {
+                return NOTE_PREFIXES[i];
             }
         }
         return null;
